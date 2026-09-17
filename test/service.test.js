@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { GeoError } from '../src/domain/errors.js';
-import { BRANCHES, testService } from './helpers.js';
+import { IpLookup } from '../src/domain/ip-lookup.js';
+import { MmdbReader } from '../src/geo/mmdb.js';
+import { BRANCHES, openTestMmdb, reference, testService } from './helpers.js';
+import { cityDatabase } from './mmdb-writer.js';
 
 test('IpLookup: normalised results, special ranges, ASN, misses, reload failures', () => {
   const { ipLookup } = testService();
@@ -37,6 +44,67 @@ test('IpLookup: normalised results, special ranges, ASN, misses, reload failures
   ipLookup.paths = { mmdbPath: 'city.mmdb', asnMmdbPath: '' };
   const recovered = ipLookup.reload();
   assert.deepEqual([recovered.ok, recovered.error, ipLookup.info().error], [true, null, null], 'a successful reload clears the recorded error');
+});
+
+test('IpLookup: load-time validation rejects a candidate whose validation lookup throws, keeping the previous database serving', () => {
+  const { ipLookup } = testService();
+  const before = ipLookup.info();
+
+  // A reader that opens "fine" (metadata decodes) but blows up on the fixed-IP validation lookup,
+  // like a database whose node table or data section is corrupted past what metadata alone reveals.
+  const brokenOpen = (/** @type {string} */ path) => {
+    if (path !== 'broken.mmdb') return openTestMmdb(path);
+    return { info: () => ({ type: 'Broken' }), lookup: () => { throw new Error('corrupted node table'); } };
+  };
+  ipLookup.open = /** @type {any} */ (brokenOpen);
+  ipLookup.paths = { mmdbPath: 'broken.mmdb', asnMmdbPath: '' };
+  const rejected = ipLookup.reload();
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error ?? '', /failed validation/);
+  assert.deepEqual(ipLookup.info().city, before.city, 'the previous, still-good database keeps serving');
+  assert.equal(ipLookup.info().error, rejected.error, 'info() reports the validation failure, not a half-applied new database');
+  assert.equal(ipLookup.available, true);
+
+  // A later good reload is not blocked by the earlier rejection.
+  ipLookup.open = openTestMmdb;
+  ipLookup.paths = { mmdbPath: 'city.mmdb', asnMmdbPath: '' };
+  const recovered = ipLookup.reload();
+  assert.deepEqual([recovered.ok, recovered.error, ipLookup.info().error], [true, null, null]);
+});
+
+test('IpLookup: checksum verification via MMDB_SHA256 and a sha256sum-format sidecar file, with the env var taking precedence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'geo-mmdb-checksum-'));
+  const path = join(dir, 'city.mmdb');
+  const bytes = cityDatabase();
+  writeFileSync(path, bytes);
+  const goodHash = createHash('sha256').update(bytes).digest('hex');
+  const badHash = '0'.repeat(64);
+  try {
+    const none = new IpLookup({ reference, paths: { mmdbPath: path, asnMmdbPath: '' }, open: MmdbReader.open });
+    assert.deepEqual([none.reload().ok, none.available], [true, true], 'neither env var nor sidecar configured: no checksum-related failure');
+
+    const goodEnv = new IpLookup({ reference, paths: { mmdbPath: path, asnMmdbPath: '', mmdbSha256: goodHash }, open: MmdbReader.open });
+    assert.deepEqual([goodEnv.reload().ok, goodEnv.available], [true, true]);
+
+    const badEnv = new IpLookup({ reference, paths: { mmdbPath: path, asnMmdbPath: '', mmdbSha256: badHash }, open: MmdbReader.open });
+    const badOutcome = badEnv.reload();
+    assert.deepEqual([badOutcome.ok, badEnv.available], [false, false]);
+    assert.match(badOutcome.error ?? '', /checksum mismatch/);
+    assert.match(badOutcome.error ?? '', new RegExp(goodHash), 'reports the actual digest for operators to compare');
+
+    writeFileSync(`${path}.sha256`, `${goodHash}  city.mmdb\n`);
+    const sidecarGood = new IpLookup({ reference, paths: { mmdbPath: path, asnMmdbPath: '' }, open: MmdbReader.open });
+    assert.equal(sidecarGood.reload().ok, true, 'sidecar file in sha256sum format is honoured when no env var is set');
+
+    writeFileSync(`${path}.sha256`, `${badHash}  city.mmdb\n`);
+    const sidecarBad = new IpLookup({ reference, paths: { mmdbPath: path, asnMmdbPath: '' }, open: MmdbReader.open });
+    assert.equal(sidecarBad.reload().ok, false);
+
+    const precedence = new IpLookup({ reference, paths: { mmdbPath: path, asnMmdbPath: '', mmdbSha256: goodHash }, open: MmdbReader.open });
+    assert.equal(precedence.reload().ok, true, 'MMDB_SHA256 is checked instead of the (mismatching) sidecar when both are present');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('PlacesService: collections, all-or-nothing upserts, nearby with filters and limits', () => {

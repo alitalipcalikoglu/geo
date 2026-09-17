@@ -20,4 +20,14 @@ test('Config: rejects bad input', () => {
   bad({ DEFAULT_LANG: 'no such lang!' }, /valid language tag/);
   bad({ MAX_RADIUS_KM: '0' }, />= 1/);
   bad({ TLS_CERT_PATH: '/x.pem' }, /must be set together/);
+  bad({ MMDB_SHA256: 'not-hex' }, /MMDB_SHA256 must be a 64-character SHA-256 hex digest/);
+  bad({ MMDB_SHA256: 'a'.repeat(63) }, /MMDB_SHA256 must be a 64-character SHA-256 hex digest/);
+  bad({ ASN_MMDB_SHA256: 'a'.repeat(65) }, /ASN_MMDB_SHA256 must be a 64-character SHA-256 hex digest/);
+});
+
+test('Config: MMDB_SHA256/ASN_MMDB_SHA256 are optional and lower-cased', () => {
+  assert.deepEqual([Config.fromEnv(testEnv()).mmdbSha256, Config.fromEnv(testEnv()).asnMmdbSha256], [null, null]);
+  const hex = 'A'.repeat(64);
+  const c = Config.fromEnv(testEnv({ MMDB_SHA256: hex, ASN_MMDB_SHA256: hex }));
+  assert.deepEqual([c.mmdbSha256, c.asnMmdbSha256], ['a'.repeat(64), 'a'.repeat(64)]);
 });

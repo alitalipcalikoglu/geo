@@ -23,6 +23,8 @@ export class Config {
     this.dbBackupDir = v.dbBackupDir;
     this.mmdbPath = v.mmdbPath;
     this.asnMmdbPath = v.asnMmdbPath;
+    this.mmdbSha256 = v.mmdbSha256;
+    this.asnMmdbSha256 = v.asnMmdbSha256;
     this.apiKeys = v.apiKeys;
     this.rateLimitMax = v.rateLimitMax;
     this.maxBatch = v.maxBatch;
@@ -55,6 +57,8 @@ export class Config {
       dbBackupDir: r.optional('DB_BACKUP_DIR') || undefined,
       mmdbPath: r.optional('MMDB_PATH'),
       asnMmdbPath: r.optional('ASN_MMDB_PATH'),
+      mmdbSha256: Config.#parseSha256(r.optional('MMDB_SHA256'), 'MMDB_SHA256'),
+      asnMmdbSha256: Config.#parseSha256(r.optional('ASN_MMDB_SHA256'), 'ASN_MMDB_SHA256'),
       apiKeys: Config.#parseApiKeys(r.required('GEO_API_KEYS')),
       rateLimitMax: r.integer('RATE_LIMIT_MAX', 3_000, { min: 1 }),
       maxBatch: r.integer('MAX_BATCH', 100, { min: 1, max: 1_000 }),
@@ -72,6 +76,13 @@ export class Config {
   static #parseApiKeys(raw) {
     return parseApiKeys(raw, 'GEO_API_KEYS', { roles: Config.ROLES, minSecretLength: Config.MIN_SECRET_LENGTH })
       .map(({ id, secret, role }) => ({ id, secret, role: /** @type {KeyRole} */ (role) }));
+  }
+
+  /** Optional 64-hex-char SHA-256 digest, lower-cased; empty string means "not configured". @param {string} raw @param {string} envName */
+  static #parseSha256(raw, envName) {
+    if (raw === '') return null;
+    if (!/^[0-9a-fA-F]{64}$/.test(raw)) throw new ConfigError(`${envName} must be a 64-character SHA-256 hex digest`);
+    return raw.toLowerCase();
   }
 
   /** BCP 47 tag that Intl accepts. @param {string} tag */

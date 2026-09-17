@@ -33,3 +33,19 @@ export class GeoError extends Error {
     this.details = details;
   }
 }
+
+/**
+ * A malformed or truncated MMDB file (or a value inside one) failed a bounds/structural check.
+ * Never a client-facing error: it is thrown while opening or reading a database file, always
+ * before a request is in flight, and `IpLookup.load()`/`reload()` catch it exactly like any other
+ * open failure (ENOENT, bad record size, ...) and turn it into `loadError`/`{ok:false}`. No HTTP
+ * status mapping, unlike {@link GeoError}, because it never surfaces through the HTTP layer.
+ */
+export class MmdbFormatError extends Error {
+  /** @param {string} message */
+  constructor(message) {
+    super(message);
+    this.name = 'MmdbFormatError';
+    this.code = 'MMDB_FORMAT_ERROR';
+  }
+}

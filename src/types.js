@@ -25,6 +25,8 @@
  * @property {string} [dbBackupDir]
  * @property {string} mmdbPath        City or country database; empty = no IP geolocation.
  * @property {string} asnMmdbPath     Optional ASN database.
+ * @property {string|null} mmdbSha256     Expected SHA-256 of `mmdbPath`'s bytes; null = not checked.
+ * @property {string|null} asnMmdbSha256  Expected SHA-256 of `asnMmdbPath`'s bytes; null = not checked.
  * @property {ApiKey[]} apiKeys
  * @property {number} rateLimitMax
  * @property {number} maxBatch

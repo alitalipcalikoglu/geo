@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { IpAddress } from '../geo/ip-address.js';
 import { MmdbReader } from '../geo/mmdb.js';
 import { GeoError } from './errors.js';
@@ -8,9 +10,18 @@ import { GeoError } from './errors.js';
  */
 export class IpLookup {
   /**
+   * Public, non-reserved anycast addresses used to sanity-check a freshly opened database before
+   * it replaces the one currently serving: a real tree-walk + data-section decode for plausible
+   * input, exercising the same bounds-checked paths a request would. "Not found" is an acceptable
+   * outcome (a Country-only or oddly-partitioned build may not cover every address); only a thrown
+   * error rejects the candidate.
+   */
+  static VALIDATION_IPS = ['1.1.1.1', '8.8.8.8'];
+
+  /**
    * @param {object} deps
    * @param {import('./reference.js').Reference} deps.reference
-   * @param {{ mmdbPath: string, asnMmdbPath: string }} deps.paths
+   * @param {{ mmdbPath: string, asnMmdbPath: string, mmdbSha256?: string|null, asnMmdbSha256?: string|null }} deps.paths
    * @param {import('../types.js').Logger} [deps.logger]
    * @param {(path: string) => MmdbReader} [deps.open]
    */
@@ -27,15 +38,73 @@ export class IpLookup {
     this.counts = { hit: 0, miss: 0, special: 0 };
   }
 
-  /** (Re)load the files named in the configuration. Throws when a configured file cannot be read; the previous readers stay. */
+  /**
+   * (Re)load the files named in the configuration. Throws when a configured file cannot be read,
+   * fails its checksum, or fails validation; the previous readers stay untouched in every failure
+   * case. Both candidates are opened and validated into local variables first, and only assigned to
+   * `this.city`/`this.asn` once everything has fully passed, so there is no window where a
+   * not-yet-validated reader is visible to a concurrent lookup.
+   */
   load() {
-    const city = this.paths.mmdbPath ? this.open(this.paths.mmdbPath) : null;
-    const asn = this.paths.asnMmdbPath ? this.open(this.paths.asnMmdbPath) : null;
+    const city = this.paths.mmdbPath ? this.#openVerified(this.paths.mmdbPath, this.paths.mmdbSha256 ?? null, 'city') : null;
+    const asn = this.paths.asnMmdbPath ? this.#openVerified(this.paths.asnMmdbPath, this.paths.asnMmdbSha256 ?? null, 'ASN') : null;
     this.city = city;
     this.asn = asn;
     this.loadError = null;
     this.loadedAt = Date.now();
     this.logger?.info({ city: city?.info().type ?? null, asn: asn?.info().type ?? null }, city ? 'IP database loaded' : 'no IP database configured');
+  }
+
+  /**
+   * Checksum (if configured) → open (decodes metadata) → validation lookups, in that order: the
+   * checksum is the cheapest gate and runs before the file is parsed as an MMDB at all.
+   * @param {string} path @param {string|null} expectedSha256 @param {string} label
+   */
+  #openVerified(path, expectedSha256, label) {
+    this.#verifyChecksum(path, expectedSha256, label);
+    const reader = this.open(path);
+    this.#validate(reader, label);
+    return reader;
+  }
+
+  /**
+   * @param {string} path @param {string|null} expectedSha256 @param {string} label
+   */
+  #verifyChecksum(path, expectedSha256, label) {
+    const expected = expectedSha256 ?? this.#sidecarChecksum(path, label);
+    if (!expected) return;
+    const actual = createHash('sha256').update(readFileSync(path)).digest('hex');
+    if (actual !== expected) throw new Error(`${label} database checksum mismatch for ${path}: expected ${expected}, got ${actual}`);
+  }
+
+  /**
+   * `<path>.sha256` sidecar, in the standard `sha256sum` output format: a 64-hex-char digest
+   * followed by whitespace and (ignored) a filename. Returns null when the sidecar is absent.
+   * @param {string} path @param {string} label
+   */
+  #sidecarChecksum(path, label) {
+    const sidecarPath = `${path}.sha256`;
+    if (!existsSync(sidecarPath)) return null;
+    const hex = readFileSync(sidecarPath, 'utf8').trim().split(/\s+/)[0] ?? '';
+    if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error(`${label} checksum sidecar ${sidecarPath} does not contain a 64-character SHA-256 hex digest`);
+    return hex.toLowerCase();
+  }
+
+  /**
+   * Runs a real lookup for each of {@link VALIDATION_IPS} against the freshly opened reader. A
+   * thrown error (a bounds violation surfacing from a corrupted node table or data section)
+   * rejects the candidate; a `null` result (address not covered by this database edition) does not.
+   * @param {MmdbReader} reader @param {string} label
+   */
+  #validate(reader, label) {
+    for (const text of IpLookup.VALIDATION_IPS) {
+      const ip = /** @type {NonNullable<ReturnType<typeof IpAddress.parse>>} */ (IpAddress.parse(text));
+      try {
+        reader.lookup(ip.bytes, ip.version);
+      } catch (err) {
+        throw new Error(`${label} database failed validation (lookup for ${text}): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   /**
