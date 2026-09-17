@@ -38,12 +38,27 @@ export class IpLookup {
     this.logger?.info({ city: city?.info().type ?? null, asn: asn?.info().type ?? null }, city ? 'IP database loaded' : 'no IP database configured');
   }
 
-  /** Same as load() but records the failure instead of throwing (used at start-up). */
-  tryLoad() {
-    try { this.load(); } catch (err) {
+  /**
+   * (Re)load without throwing: catches a failure, keeps the previous readers serving, records the
+   * error for {@link info}, and reports whether it worked. Used by the manual reload endpoint,
+   * which needs the outcome to answer the caller; {@link tryLoad} is the fire-and-forget form used
+   * at start-up and on `SIGHUP`, where nothing is listening for a return value.
+   * @returns {{ ok: boolean, error: string|null }}
+   */
+  reload() {
+    try {
+      this.load();
+      return { ok: true, error: null };
+    } catch (err) {
       this.loadError = err instanceof Error ? err.message : String(err);
       this.logger?.error({ err }, 'IP database failed to load');
+      return { ok: false, error: this.loadError };
     }
+  }
+
+  /** Same as {@link reload} but discards the outcome (used at start-up and on `SIGHUP`). */
+  tryLoad() {
+    this.reload();
   }
 
   get available() {

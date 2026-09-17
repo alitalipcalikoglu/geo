@@ -159,7 +159,12 @@ export class GeoApi {
       return { items: b.ips.map((ip) => ({ ip, ...attempt(() => this.ipLookup.lookup(ip, l)) })) };
     });
     api.get('/database', read, async () => this.ipLookup.info());
-    api.post('/database/reload', { config: { audit: AuditClient.route('geo.database.reload', () => null, (_r, b) => ({ type: b?.city?.type ?? null })) }, ...write }, async () => { this.ipLookup.load(); this.readyCache.at = 0; return this.ipLookup.info(); });
+    api.post('/database/reload', { config: { audit: AuditClient.route('geo.database.reload', () => null, (_r, b) => ({ type: b?.city?.type ?? null })) }, ...write }, async () => {
+      const outcome = this.ipLookup.reload();
+      this.readyCache.at = 0; // force the next /ready to re-check rather than serve a cached verdict from before the reload
+      if (!outcome.ok) throw new GeoError('DATABASE_RELOAD_FAILED', `IP database failed to reload: ${outcome.error}`);
+      return this.ipLookup.info();
+    });
 
     // ---- reference
     api.get('/countries', { ...read, schema: { querystring: Schemas.countriesQuery } }, async (request) => {

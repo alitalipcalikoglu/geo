@@ -16,6 +16,7 @@ export class GeoError extends Error {
     COLLECTION_EXISTS: 409,
     PLACE_NOT_FOUND: 404,
     DATABASE_UNAVAILABLE: 503,
+    DATABASE_RELOAD_FAILED: 409,
     FORBIDDEN: 403,
   };
 

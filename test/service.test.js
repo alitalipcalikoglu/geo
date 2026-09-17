@@ -30,6 +30,13 @@ test('IpLookup: normalised results, special ranges, ASN, misses, reload failures
   ipLookup.paths = { mmdbPath: 'missing.mmdb', asnMmdbPath: '' };
   assert.throws(() => ipLookup.load(), /ENOENT/);
   assert.equal(ipLookup.available, true, 'failed reload keeps the previous database');
+  // reload() is the non-throwing form the HTTP route uses: it must report the outcome instead of
+  // letting the caller find out only through a thrown error, and must still keep serving.
+  const outcome = ipLookup.reload();
+  assert.deepEqual([outcome.ok, outcome.error?.startsWith('ENOENT'), ipLookup.info().error?.startsWith('ENOENT'), ipLookup.available], [false, true, true, true]);
+  ipLookup.paths = { mmdbPath: 'city.mmdb', asnMmdbPath: '' };
+  const recovered = ipLookup.reload();
+  assert.deepEqual([recovered.ok, recovered.error, ipLookup.info().error], [true, null, null], 'a successful reload clears the recorded error');
 });
 
 test('PlacesService: collections, all-or-nothing upserts, nearby with filters and limits', () => {

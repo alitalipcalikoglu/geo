@@ -34,4 +34,5 @@ Applications get `read`; the job that syncs branches gets `write`; the console g
 | 409 | `COLLECTION_EXISTS` | Name taken |
 | 413 | `BATCH_TOO_LARGE` | More than `MAX_BATCH` items, or a collection over `MAX_POINTS` |
 | 429 | `RATE_LIMITED` | The service's own per-key limit |
+| 409 | `DATABASE_RELOAD_FAILED` | POST /v1/database/reload could not read the configured file; the previous database keeps serving |
 | 503 | `DATABASE_UNAVAILABLE` | IP lookup without a loaded database |

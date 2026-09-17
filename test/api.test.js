@@ -50,11 +50,14 @@ test('API: ip lookups, batch, self, database info and reload', async (t) => {
   assert.deepEqual([json(res).loaded, json(res).city.type, json(res).city.builtAt, json(res).asn.type, json(res).lookups.hit], [true, 'Test-City', '2025-10-09T08:53:20.000Z', 'Test-ASN', 4]);
   ipLookup.paths = { mmdbPath: 'missing.mmdb', asnMmdbPath: '' };
   res = await app.inject({ method: 'POST', url: '/v1/database/reload', headers: bearer(WRITE_KEY) });
-  assert.equal(res.statusCode, 500, 'a failed reload surfaces as an error');
+  assert.equal(res.statusCode, 409, 'a failed reload is reported, not an opaque 500');
+  assert.deepEqual([json(res).error.code, json(res).error.message.includes('ENOENT') || json(res).error.message.includes('missing.mmdb')], ['DATABASE_RELOAD_FAILED', true]);
   assert.equal(json(await app.inject({ url: '/v1/ip/81.5.6.7', headers: bearer(READ_KEY) })).found, true, 'previous database still serves');
+  res = await app.inject({ url: '/v1/database', headers: bearer(READ_KEY) });
+  assert.deepEqual([json(res).loaded, json(res).error !== null, json(res).city.type], [true, true, 'Test-City'], 'the failure is recorded, but the previous city reader is still the one reported as loaded');
   ipLookup.paths = { mmdbPath: 'city.mmdb', asnMmdbPath: '' };
   res = await app.inject({ method: 'POST', url: '/v1/database/reload', headers: bearer(WRITE_KEY) });
-  assert.deepEqual([res.statusCode, json(res).asn], [200, null]);
+  assert.deepEqual([res.statusCode, json(res).asn, json(res).error], [200, null, null], 'a subsequent successful reload clears the recorded error');
 });
 
 test('API: reference data, phone and distance', async (t) => {

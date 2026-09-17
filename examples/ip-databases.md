@@ -47,7 +47,7 @@ mv /var/lib/geo/GeoLite2-City.mmdb.new /var/lib/geo/GeoLite2-City.mmdb
 gcurl -X POST $GEO/v1/database/reload      # write role
 ```
 
-Or send `SIGHUP` to the process (`pm2 sendSignal SIGHUP geo`). A reload that fails (missing file, corrupt download) keeps the previous database serving and reports the error in `/v1/database`; a failure at start-up makes `/ready` answer 503 until a reload succeeds. Schedule the download with the scheduler service (weekly `at`/cron job calling a small script on the host) and the reload call after it.
+Or send `SIGHUP` to the process (`pm2 sendSignal SIGHUP geo`). A reload that fails (missing file, corrupt download) keeps the previous database serving and reports the error in `/v1/database`; the manual `POST /v1/database/reload` also answers `409 DATABASE_RELOAD_FAILED` with the error message, so a deploy script can detect it directly instead of polling `/v1/database`. A failure at start-up makes `/ready` answer 503 until a reload succeeds. Schedule the download with the scheduler service (weekly `at`/cron job calling a small script on the host) and the reload call after it.
 
 ## Running without one
 
