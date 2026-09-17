@@ -1,5 +1,6 @@
 import { Config } from './config.js';
-import { AuditClient } from './net/audit-client.js';
+import { AuditClient } from '@atc-web/service-core/audit';
+import { Lifecycle } from '@atc-web/service-core/lifecycle';
 import { Database } from './db.js';
 import { IpLookup } from './domain/ip-lookup.js';
 import { Phone } from './domain/phone.js';
@@ -24,7 +25,8 @@ export class Application {
     this.places = new PlacesService({ db: this.db, collections: this.collections, places: this.placeStore, options: config });
     /** @type {import('fastify').FastifyInstance|null} */
     this.app = null;
-    this.shuttingDown = false;
+    /** @type {(reason: string) => Promise<void>} */
+    this.shutdown = async () => {};
   }
 
   /** Build from `process.env`; exits with a readable message on bad configuration. */
@@ -47,7 +49,18 @@ export class Application {
     this.app = app;
     this.ipLookup.logger = app.log;
     this.ipLookup.tryLoad();
-    this.#installSignalHandlers(app.log);
+    const { shutdown } = Lifecycle.install({
+      forceExitMs: 30_000,
+      log: app.log,
+      steps: [
+        () => this.app?.close(),
+        () => this.audit.close(),
+        () => this.db.close(),
+      ],
+    });
+    this.shutdown = shutdown;
+    // Not a shutdown step: reloads the IP database in place, independent of the lifecycle above.
+    process.on('SIGHUP', () => { app.log.info('SIGHUP: reloading IP database'); this.ipLookup.tryLoad(); });
     this.audit.logger = app.log;
     this.audit.start();
     await app.listen({ port: config.port, host: config.host });
@@ -55,41 +68,4 @@ export class Application {
     if (process.send) process.send('ready'); // PM2 wait_ready
   }
 
-  /** @param {string} reason */
-  async shutdown(reason) {
-    if (this.shuttingDown) return;
-    this.shuttingDown = true;
-    const log = /** @type {import('./types.js').Logger} */ (this.app?.log ?? console);
-    log.info({ reason }, 'shutting down');
-    const forceExit = setTimeout(() => {
-      log.error('shutdown timed out, exiting');
-      process.exit(1);
-    }, 30_000).unref();
-    try {
-      await this.app?.close();
-      await this.audit.close();
-      this.db.close();
-      clearTimeout(forceExit);
-      log.info('shutdown complete');
-      process.exit(0);
-    } catch (err) {
-      log.error({ err }, 'shutdown failed');
-      process.exit(1);
-    }
-  }
-
-  /** @param {import('./types.js').Logger} log */
-  #installSignalHandlers(log) {
-    process.on('SIGTERM', () => this.shutdown('SIGTERM'));
-    process.on('SIGINT', () => this.shutdown('SIGINT'));
-    process.on('SIGHUP', () => { log.info('SIGHUP: reloading IP database'); this.ipLookup.tryLoad(); });
-    process.on('unhandledRejection', (reason) => {
-      log.fatal({ err: reason }, 'unhandled rejection');
-      this.shutdown('unhandledRejection');
-    });
-    process.on('uncaughtException', (err) => {
-      log.fatal({ err }, 'uncaught exception');
-      process.exit(1);
-    });
-  }
 }
