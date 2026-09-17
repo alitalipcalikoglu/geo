@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { Config } from '../src/config.js';
 import { Database } from '../src/db.js';
 import { IpLookup } from '../src/domain/ip-lookup.js';
@@ -43,6 +44,9 @@ export function openTestMmdb(path) {
 
 export const reference = Reference.load();
 
+/** The service's own version, as `readServiceVersion` would resolve it in production. */
+export const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+
 /** Wired domain objects over an in-memory database with a fixed clock. @param {Record<string, string>} [overrides] */
 export function testService(overrides) {
   const config = testConfig(overrides);
@@ -53,7 +57,7 @@ export function testService(overrides) {
   const places = new PlacesService({ db, collections, places: placeStore, options: config, now: () => clock.t });
   const ipLookup = new IpLookup({ reference, paths: config, open: openTestMmdb });
   ipLookup.tryLoad();
-  return { config, db, collections, placeStore, places, ipLookup, reference, phone: new Phone(reference), clock };
+  return { config, db, collections, placeStore, places, ipLookup, reference, phone: new Phone(reference), clock, version };
 }
 
 /** Fully wired Fastify app. @param {Record<string, string>} [overrides] @param {object} [deps] Extra constructor deps, e.g. an AuditClient. */

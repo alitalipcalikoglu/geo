@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
 import { AuditClient } from '@atc-web/service-core/audit';
-import { createErrorHandler, jsonParser, registerProbes } from '@atc-web/service-core/fastify';
+import { createErrorHandler, jsonParser, registerInfo, registerProbes } from '@atc-web/service-core/fastify';
 import { GeoError } from '../domain/errors.js';
 import { PlacesService } from '../domain/places-service.js';
 import { Reference } from '../domain/reference.js';
@@ -30,10 +30,11 @@ export class GeoApi {
    * @param {import('../store/collection-store.js').CollectionStore} deps.collections
    * @param {import('../store/place-store.js').PlaceStore} deps.placeStore
    * @param {import('../db.js').Database} deps.db
+   * @param {string} deps.version
    * @param {import('../types.js').Logger} [deps.logger]
    * @param {import('@atc-web/service-core/audit').AuditClient} [deps.audit]
    */
-  constructor({ config, audit, ipLookup, reference, phone, places, collections, placeStore, db, logger }) {
+  constructor({ config, audit, ipLookup, reference, phone, places, collections, placeStore, db, version, logger }) {
     this.config = config;
     this.audit = audit;
     this.ipLookup = ipLookup;
@@ -43,6 +44,7 @@ export class GeoApi {
     this.collections = collections;
     this.placeStore = placeStore;
     this.db = db;
+    this.version = version;
     this.logger = logger;
     this.auth = new ApiKeyAuth(config.apiKeys);
     /** @type {() => void} Set once `build()` registers the probes. */
@@ -78,6 +80,12 @@ export class GeoApi {
       if (this.ipLookup.paths.mmdbPath && !this.ipLookup.available) throw new Error(`IP database not loaded: ${this.ipLookup.loadError ?? 'unknown'}`);
     }, { cacheMs: GeoApi.READY_CACHE_MS });
     this.invalidateReady = invalidate;
+    registerInfo(app, {
+      service: 'geo',
+      version: this.version,
+      capabilities: ['ip-lookup', 'phone-normalize', 'distance', 'place-search', 'manual-reload'],
+      schemaVersion: this.db.schemaVersion,
+    });
     await app.register((api) => this.#registerV1(api), { prefix: '/v1' });
     await app.register((ops) => this.#registerMetrics(ops));
     return app;

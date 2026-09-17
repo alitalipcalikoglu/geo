@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { BRANCHES, READ_KEY, RW_KEY, WRITE_KEY, bearer, buildApp } from './helpers.js';
 
 const json = (/** @type {import('light-my-request').Response} */ r) => JSON.parse(r.body);
+const pkgVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 test('API: probes, auth and roles', async (t) => {
   const { app } = await buildApp();
@@ -121,4 +123,22 @@ test('API: collections, places, nearby, stats, metrics', async (t) => {
   assert.deepEqual(json(await app.inject({ method: 'POST', url: '/v1/collections/branches/clear', headers: { ...bearer(WRITE_KEY), 'content-type': 'application/json' } })), { removed: 3 });
   assert.equal((await app.inject({ method: 'DELETE', url: '/v1/collections/branches', headers: bearer(WRITE_KEY) })).statusCode, 204);
   assert.equal((await app.inject({ url: '/v1/collections/branches', headers: bearer(READ_KEY) })).statusCode, 404);
+});
+
+test('API: /v1/info', async (t) => {
+  const { app } = await buildApp();
+  t.after(() => app.close());
+  const res = await app.inject({ url: '/v1/info' });
+  assert.equal(res.statusCode, 200);
+  const body = json(res);
+  assert.equal(typeof body.schemaVersion, 'number');
+  assert.equal(typeof body.serviceCore, 'string');
+  assert.deepEqual(body, {
+    service: 'geo',
+    version: pkgVersion,
+    apiVersion: 'v1',
+    capabilities: ['ip-lookup', 'phone-normalize', 'distance', 'place-search', 'manual-reload'],
+    schemaVersion: body.schemaVersion,
+    serviceCore: body.serviceCore,
+  });
 });

@@ -43,6 +43,14 @@ npm run typecheck
 - **Places**: named collections of `{ id, name, lat, lng, attrs }`, upserted all-or-nothing; nearby search within a radius with attribute filters, nearest first.
 - **Keys** are `id:secret[:role]` with roles `read`, `write`, `readwrite`.
 
+## Boundaries
+
+**Purpose:** IP geolocation, phone normalization, distance, and place-collection lookups.
+
+**Responsibilities:** IP/ASN lookup via MMDB; E.164 phone normalization; distance calculation; place collection CRUD and nearby search; manual and SIGHUP-triggered MMDB reload.
+
+**Non-responsibilities:** not authoritative for the MMDB data itself — it consumes a third-party database file and does not maintain or verify its accuracy; reload has no checksum/integrity verification today (a real gap, tracked as a pre-existing item, not fixed here). Place collections are a convenience store, not a general-purpose geospatial database.
+
 ## API
 
 Errors are JSON: `{ "error": { "code", "message", "details?" } }`. `lang` (BCP 47) is accepted by every reference endpoint.

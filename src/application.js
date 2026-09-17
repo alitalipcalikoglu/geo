@@ -1,6 +1,7 @@
 import { Config } from './config.js';
 import { AuditClient } from '@atc-web/service-core/audit';
 import { Lifecycle } from '@atc-web/service-core/lifecycle';
+import { readServiceVersion } from '@atc-web/service-core/fastify';
 import { Database } from './db.js';
 import { IpLookup } from './domain/ip-lookup.js';
 import { Phone } from './domain/phone.js';
@@ -15,6 +16,7 @@ export class Application {
   /** @param {Config} config */
   constructor(config) {
     this.config = config;
+    this.version = readServiceVersion(import.meta.url);
     this.audit = new AuditClient({ target: config.audit });
     this.db = new Database(config.dbPath, { backupDir: config.dbBackupDir });
     this.reference = Reference.load();
@@ -44,7 +46,7 @@ export class Application {
 
   async start() {
     const { config } = this;
-    const api = new GeoApi({ config, audit: this.audit, ipLookup: this.ipLookup, reference: this.reference, phone: this.phone, places: this.places, collections: this.collections, placeStore: this.placeStore, db: this.db });
+    const api = new GeoApi({ config, audit: this.audit, ipLookup: this.ipLookup, reference: this.reference, phone: this.phone, places: this.places, collections: this.collections, placeStore: this.placeStore, db: this.db, version: this.version });
     const app = await api.build();
     this.app = app;
     this.ipLookup.logger = app.log;
