@@ -57,7 +57,7 @@ Errors are JSON: `{ "error": { "code", "message", "details?" } }`. `lang` (BCP 4
 
 | Method | Path | Role | Purpose |
 |---|---|---|---|
-| GET | `/health`, `/ready` | none | Liveness; readiness (database, IP database when configured; cached 10 s). |
+| GET | `/health`, `/ready`, `/v1/info` | none | Liveness; readiness (database, IP database when configured; cached 10 s); service identity (version, API version, capabilities, schema version, service-core version). |
 | GET | `/v1/ip/:ip`, `/v1/ip/self` | read | Geolocation of an address, or of the caller. |
 | POST | `/v1/ip/batch` | read | `{ ips: [...], lang? }` → per-address results or errors. |
 | GET / POST | `/v1/database`, `/v1/database/reload` | read / write | Loaded databases, build dates, lookup counters; reload the files. |
