@@ -56,10 +56,10 @@ export function testService(overrides) {
   return { config, db, collections, placeStore, places, ipLookup, reference, phone: new Phone(reference), clock };
 }
 
-/** Fully wired Fastify app. @param {Record<string, string>} [overrides] */
-export async function buildApp(overrides) {
+/** Fully wired Fastify app. @param {Record<string, string>} [overrides] @param {object} [deps] Extra constructor deps, e.g. an AuditClient. */
+export async function buildApp(overrides, deps = {}) {
   const t = testService(overrides);
-  const app = await new GeoApi({ ...t, logger: /** @type {any} */ ({ info() {}, warn() {}, error() {}, fatal() {}, debug() {}, trace() {}, child() { return this; } }) }).build();
+  const app = await new GeoApi({ ...t, ...deps, logger: /** @type {any} */ ({ info() {}, warn() {}, error() {}, fatal() {}, debug() {}, trace() {}, child() { return this; } }) }).build();
   await app.ready();
   return { app, ...t };
 }

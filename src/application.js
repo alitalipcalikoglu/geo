@@ -1,4 +1,5 @@
 import { Config } from './config.js';
+import { AuditClient } from './net/audit-client.js';
 import { Database } from './db.js';
 import { IpLookup } from './domain/ip-lookup.js';
 import { Phone } from './domain/phone.js';
@@ -13,6 +14,7 @@ export class Application {
   /** @param {Config} config */
   constructor(config) {
     this.config = config;
+    this.audit = new AuditClient({ target: config.audit });
     this.db = new Database(config.dbPath);
     this.reference = Reference.load();
     this.phone = new Phone(this.reference);
@@ -40,12 +42,14 @@ export class Application {
 
   async start() {
     const { config } = this;
-    const api = new GeoApi({ config, ipLookup: this.ipLookup, reference: this.reference, phone: this.phone, places: this.places, collections: this.collections, placeStore: this.placeStore, db: this.db });
+    const api = new GeoApi({ config, audit: this.audit, ipLookup: this.ipLookup, reference: this.reference, phone: this.phone, places: this.places, collections: this.collections, placeStore: this.placeStore, db: this.db });
     const app = await api.build();
     this.app = app;
     this.ipLookup.logger = app.log;
     this.ipLookup.tryLoad();
     this.#installSignalHandlers(app.log);
+    this.audit.logger = app.log;
+    this.audit.start();
     await app.listen({ port: config.port, host: config.host });
     app.log.info({ tls: config.tls !== null, countries: this.reference.all.length, ipDatabase: this.ipLookup.info().city?.type ?? null, collections: this.collections.all().length }, config.tls ? 'serving HTTPS' : 'serving plain HTTP, terminate TLS at a reverse proxy');
     if (process.send) process.send('ready'); // PM2 wait_ready
@@ -63,6 +67,7 @@ export class Application {
     }, 30_000).unref();
     try {
       await this.app?.close();
+      await this.audit.close();
       this.db.close();
       clearTimeout(forceExit);
       log.info('shutdown complete');

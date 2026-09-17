@@ -102,6 +102,10 @@ examples/                   one walkthrough per feature
 - National phone numbering plans (operator prefixes, exact lengths): the service validates E.164 shape and country only.
 - Spatial queries beyond radius search (polygons, routing): use PostGIS or a routing engine.
 
+## Audit events
+
+With `AUDIT_URL` and `AUDIT_API_KEY` set, every completed write request is forwarded to the audit service as one event (`success`, or `denied` on 403) with the calling key as actor, the affected entity as target, client IP, user agent and request id. Events are buffered and sent in batches; the audit service being down never fails a request. Actions: see [examples/audit-events.md](examples/audit-events.md).
+
 ## License
 
 MIT, Ali Talip CALIKOGLU.

@@ -13,6 +13,7 @@ Scenario-driven walkthroughs of every feature. Requests to `/v1/*` need `Authori
 | [Places and nearby search](places.md) | Uploading your own points, nearest branches within a radius, attribute filters |
 | [API keys and roles](keys-and-roles.md) | Read, write, readwrite; error codes |
 | [Operations](operations.md) | Health, readiness, metrics, environment, memory, PM2, Docker, backups |
+| [Audit events](audit-events.md) | Which write actions are forwarded to the audit service, event shape, configuration |
 
 Set up once for the examples:
 

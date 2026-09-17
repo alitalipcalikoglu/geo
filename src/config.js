@@ -21,6 +21,7 @@ export class Config {
     this.logLevel = v.logLevel;
     this.trustProxy = v.trustProxy;
     this.tls = v.tls;
+    this.audit = v.audit;
     this.bodyLimit = v.bodyLimit;
     this.dbPath = v.dbPath;
     this.mmdbPath = v.mmdbPath;
@@ -51,6 +52,7 @@ export class Config {
       logLevel: r.optional('LOG_LEVEL') || 'info',
       trustProxy: r.boolean('TRUST_PROXY', false),
       tls: certPath ? { certPath, keyPath } : null,
+      audit: Config.#parseAudit(r),
       bodyLimit: r.integer('BODY_LIMIT', 2_097_152, { min: 1_024 }),
       dbPath: r.optional('DB_PATH') || './data/geo.db',
       mmdbPath: r.optional('MMDB_PATH'),
@@ -92,6 +94,19 @@ export class Config {
     } catch {
       throw new ConfigError(`DEFAULT_LANG "${tag}" is not a valid language tag`);
     }
+  }
+  /**
+   * `AUDIT_URL` + `AUDIT_API_KEY`: both or neither. Empty = audit events are not forwarded.
+   * @param {EnvReader} r
+   */
+  static #parseAudit(r) {
+    const url = r.optional('AUDIT_URL').replace(/\/+$/, '');
+    const apiKey = r.optional('AUDIT_API_KEY');
+    if (!url && !apiKey) return null;
+    if (!url || !apiKey) throw new ConfigError('AUDIT_URL and AUDIT_API_KEY must be set together');
+    if (!/^https?:\/\/[^\s]+$/.test(url)) throw new ConfigError('AUDIT_URL must be an absolute http(s) URL');
+    if (apiKey.length < 32) throw new ConfigError('AUDIT_API_KEY must be at least 32 characters');
+    return { url, apiKey };
   }
 }
 
