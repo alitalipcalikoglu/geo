@@ -106,6 +106,24 @@ examples/                   one walkthrough per feature
 
 With `AUDIT_URL` and `AUDIT_API_KEY` set, every completed write request is forwarded to the audit service as one event (`success`, or `denied` on 403) with the calling key as actor, the affected entity as target, client IP, user agent and request id. Events are buffered and sent in batches; the audit service being down never fails a request. Actions: see [examples/audit-events.md](examples/audit-events.md).
 
+## Scaling model
+
+Single-node stateful for place collections (one process owns the SQLite file); the IP/reference
+lookups are read-only and in-memory once loaded, which would scale independently if ever split out
+— it is not split out today, so the service as a whole is classified single-node.
+
+## Observability
+
+Accepts an inbound `X-Request-Id` unconditionally and logs it via Fastify's default request
+logging. Does not parse or forward `traceparent`.
+
+## Backup / restore
+
+Back up the database (place collections); the MMDB file is a vendor download, not this service's
+own state, and is not part of the backup.
+
+See [docs/READINESS.md](docs/READINESS.md) for the full contract.
+
 ## License
 
 MIT, Ali Talip CALIKOGLU.
