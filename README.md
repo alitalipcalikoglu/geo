@@ -120,7 +120,15 @@ logging. Does not parse or forward `traceparent`.
 ## Backup / restore
 
 Back up the database (place collections); the MMDB file is a vendor download, not this service's
-own state, and is not part of the backup.
+own state, and is not part of the backup. Use `stack backup`/`stack restore` from the workspace
+root (see `stack/docs/UPGRADE.md`) to do this consistently alongside the rest of the stack. On
+every start, before applying a pending migration to an existing database, the service itself also
+snapshots the file to `DB_PATH.pre-v<N>-<timestamp>` (directory overridable with
+`DB_BACKUP_DIR`) — a manual last resort if `stack restore` is unavailable.
+
+**Rollback limitations:** none of the migrations are reversible; to roll back, restore the
+pre-migration copy (or a `stack backup` snapshot taken before the upgrade) and run the previous
+version of this service against it.
 
 See [docs/READINESS.md](docs/READINESS.md) for the full contract.
 

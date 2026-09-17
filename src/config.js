@@ -20,6 +20,7 @@ export class Config {
     this.audit = v.audit;
     this.bodyLimit = v.bodyLimit;
     this.dbPath = v.dbPath;
+    this.dbBackupDir = v.dbBackupDir;
     this.mmdbPath = v.mmdbPath;
     this.asnMmdbPath = v.asnMmdbPath;
     this.apiKeys = v.apiKeys;
@@ -51,6 +52,7 @@ export class Config {
       audit: parseAudit(r),
       bodyLimit: r.integer('BODY_LIMIT', 2_097_152, { min: 1_024 }),
       dbPath: r.optional('DB_PATH') || './data/geo.db',
+      dbBackupDir: r.optional('DB_BACKUP_DIR') || undefined,
       mmdbPath: r.optional('MMDB_PATH'),
       asnMmdbPath: r.optional('ASN_MMDB_PATH'),
       apiKeys: Config.#parseApiKeys(r.required('GEO_API_KEYS')),

@@ -16,7 +16,7 @@ export class Application {
   constructor(config) {
     this.config = config;
     this.audit = new AuditClient({ target: config.audit });
-    this.db = new Database(config.dbPath);
+    this.db = new Database(config.dbPath, { backupDir: config.dbBackupDir });
     this.reference = Reference.load();
     this.phone = new Phone(this.reference);
     this.ipLookup = new IpLookup({ reference: this.reference, paths: config });

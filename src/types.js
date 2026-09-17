@@ -22,6 +22,7 @@
  * @property {{ url: string, apiKey: string }|null} audit   Audit service to forward events to; null = off.
  * @property {number} bodyLimit
  * @property {string} dbPath
+ * @property {string} [dbBackupDir]
  * @property {string} mmdbPath        City or country database; empty = no IP geolocation.
  * @property {string} asnMmdbPath     Optional ASN database.
  * @property {ApiKey[]} apiKeys
