@@ -90,9 +90,13 @@ malformed, a fresh trace is started. Both `traceId`/`spanId` are logged on every
 ## Security model
 
 API keys (`id:secret[:role]`, roles `read`/`write`/`readwrite`; write covers collections, places,
-and database reload). No checksum or signature verification of the MMDB file before loading it —
-operator-supplied file is trusted as-is (the reader validates the file's own internal format
-metadata marker, but not its provenance). No secret rotation beyond changing the key list.
+and database reload). The MMDB file is checksum-verified before every load and reload: an expected
+SHA-256 (`MMDB_SHA256`/`ASN_MMDB_SHA256`, or a `<path>.sha256` sidecar file) is compared against the
+file on disk before it's parsed, and a mismatch aborts the load — a candidate file is also opened
+and validated with real lookups before it's ever swapped in, so a corrupted or unverified file never
+becomes the live database. No verification is performed if no expected checksum is configured either
+way (env var or sidecar) — that is an operator configuration choice, not an implicit trust decision
+the code makes for you. No secret rotation beyond changing the key list.
 
 ## Scaling model
 
