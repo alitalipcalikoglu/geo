@@ -16,7 +16,7 @@ module.exports = {
       autorestart: true,
       exp_backoff_restart_delay: 200,
       max_restarts: 20,
-      max_memory_restart: '600M'    // a City MMDB file is held in memory (GeoLite2-City is about 70 MB),
+      max_memory_restart: '600M',    // a City MMDB file is held in memory (GeoLite2-City is about 70 MB),
       wait_ready: true,         // process.send('ready') after listen()
       listen_timeout: 10000,
       kill_timeout: 35000,      // SIGTERM → finish in-flight requests → exit (internal force-exit at 30s)
