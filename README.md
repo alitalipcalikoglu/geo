@@ -49,7 +49,7 @@ npm run typecheck
 
 **Responsibilities:** IP/ASN lookup via MMDB; E.164 phone normalization; distance calculation; place collection CRUD and nearby search; manual and SIGHUP-triggered MMDB reload.
 
-**Non-responsibilities:** not authoritative for the MMDB data itself — it consumes a third-party database file and does not maintain or verify its accuracy; reload has no checksum/integrity verification today (a real gap, tracked as a pre-existing item, not fixed here). Place collections are a convenience store, not a general-purpose geospatial database.
+**Non-responsibilities:** not authoritative for the MMDB data itself — it consumes a third-party database file and does not maintain or verify its accuracy beyond the optional byte-level checksum described in "Security notes" (a mismatch rejects the file; it says nothing about whether the data inside it is correct). Place collections are a convenience store, not a general-purpose geospatial database.
 
 ## API
 
@@ -75,13 +75,23 @@ Errors are JSON: `{ "error": { "code", "message", "details?" } }`. `lang` (BCP 4
 | GET | `/v1/stats` | read | Database info, counts, sizes. |
 | GET | `/metrics` | read | Prometheus text: lookups by result, database loaded and build epoch, collections, places, database size, uptime. |
 
-Examples for every feature, with requests and responses: [examples/README.md](examples/README.md).
+## Examples
+
+Scenario walkthroughs for every feature live in [examples/](examples/README.md).
 
 ## Configuration
 
-Environment only; see [.env.example](.env.example). Required: `GEO_API_KEYS`. IP geolocation needs `MMDB_PATH` (and optionally `ASN_MMDB_PATH`); see [examples/ip-databases.md](examples/ip-databases.md) for free databases. Notable: `DEFAULT_LANG`, `MAX_BATCH`, `MAX_POINTS`, `MAX_RADIUS_KM`, `RATE_LIMIT_MAX`, `TRUST_PROXY` (needed for `/v1/ip/self` behind a proxy), `TLS_CERT_PATH` / `TLS_KEY_PATH`.
+Environment only; see [.env.example](.env.example). Required: `GEO_API_KEYS`. IP geolocation needs `MMDB_PATH` (and optionally `ASN_MMDB_PATH`); see [examples/ip-databases.md](examples/ip-databases.md) for free databases. Notable: `MMDB_SHA256` / `ASN_MMDB_SHA256` (optional checksum verification, see "Security notes"), `DEFAULT_LANG`, `MAX_BATCH`, `MAX_POINTS`, `MAX_RADIUS_KM`, `RATE_LIMIT_MAX`, `TRUST_PROXY` (needed for `/v1/ip/self` behind a proxy), `TLS_CERT_PATH` / `TLS_KEY_PATH`.
 
-## Layout
+## Security notes
+
+- API keys: compared in constant time against every configured key (SHA-256 digest + `timingSafeEqual`, no early exit), so timing never reveals whether, or which, key matched (`@atc-web/service-core/auth`, `ApiKeyAuth`).
+- Roles: `read`/`write`/`readwrite`, enforced per route (`ApiKeyAuth.require`); no per-collection scoping — any `read`/`write` key can reach every place collection.
+- MMDB checksum verification (Stage 10): when `MMDB_SHA256` / `ASN_MMDB_SHA256` is set, or a `<path>.sha256` sidecar file exists next to the database, the SHA-256 of the file's bytes is checked before it is parsed as an MMDB, on every load and reload; a mismatch rejects the candidate and keeps the previously loaded database serving. The env var takes precedence over the sidecar file when both are present. Checksum verification is optional and never blocks startup: with neither an env var nor a sidecar present, a database loads unverified as before. A freshly opened database is additionally validated with real lookups against known public IPs before it replaces the one currently serving; a candidate that fails either check never goes live.
+- Request bodies capped at `BODY_LIMIT` (default 2 MiB, sized for place uploads); `Cache-Control: no-store` on every response.
+- Container runs as the unprivileged `node` user.
+
+## Code layout
 
 ```
 src/
@@ -103,7 +113,7 @@ test/                       node:test suites; test/mmdb-writer.js builds MMDB fi
 examples/                   one walkthrough per feature
 ```
 
-## Out of scope
+## Out of scope by design
 
 - Geocoding and address normalization (street address to coordinates and back): needs a map dataset or a provider; call one from your application and store the result in a place collection if you need nearby search on it.
 - Time zone from coordinates: needs zone polygons. The IP lookup returns the zone when the database carries it; otherwise use the country's zones.
