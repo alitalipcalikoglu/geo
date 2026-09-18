@@ -81,7 +81,11 @@ Redacts `authorization`.
 
 ## Tracing
 
-Accepts an inbound `X-Request-Id` unconditionally. Does not parse or forward `traceparent`.
+Accepts an inbound `X-Request-Id` unconditionally. Also parses an inbound `traceparent` via
+`@atc-web/service-core`'s `registerRequestContext`, trust-gated on `TRUST_PROXY` (same boundary as
+`X-Forwarded-*`): trusted, the caller's trace-id is continued with a fresh span-id; untrusted or
+malformed, a fresh trace is started. Both `traceId`/`spanId` are logged on every request line. See
+[OBSERVABILITY.md](../../stack/docs/OBSERVABILITY.md).
 
 ## Security model
 

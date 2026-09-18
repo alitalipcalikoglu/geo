@@ -133,7 +133,10 @@ lookups are read-only and in-memory once loaded, which would scale independently
 ## Observability
 
 Accepts an inbound `X-Request-Id` unconditionally and logs it via Fastify's default request
-logging. Does not parse or forward `traceparent`.
+logging. Also parses an inbound `traceparent`, trusted only when `TRUST_PROXY=true` — the caller's
+trace-id is continued with a fresh span-id for this hop, both logged as `traceId`/`spanId` via
+`@atc-web/service-core`'s `registerRequestContext`. See
+[OBSERVABILITY.md](../stack/docs/OBSERVABILITY.md).
 
 ## Backup / restore
 

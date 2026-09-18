@@ -1,9 +1,8 @@
-import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
 import { AuditClient } from '@atc-web/service-core/audit';
-import { createErrorHandler, jsonParser, registerInfo, registerProbes } from '@atc-web/service-core/fastify';
+import { createErrorHandler, jsonParser, registerInfo, registerProbes, registerRequestContext, requestOptions } from '@atc-web/service-core/fastify';
 import { GeoError } from '../domain/errors.js';
 import { PlacesService } from '../domain/places-service.js';
 import { Reference } from '../domain/reference.js';
@@ -56,14 +55,12 @@ export class GeoApi {
     const { config } = this;
     const app = Fastify({
       ...(config.tls ? { https: { cert: readFileSync(config.tls.certPath), key: readFileSync(config.tls.keyPath), minVersion: 'TLSv1.2' } } : {}),
-      loggerInstance: this.logger,
-      logger: this.logger ? undefined : { level: config.logLevel, redact: ['req.headers.authorization'] },
+      ...requestOptions({ logger: this.logger, logLevel: config.logLevel }),
       trustProxy: config.trustProxy,
       bodyLimit: config.bodyLimit,
-      requestIdHeader: 'x-request-id',
-      genReqId: () => randomUUID(),
       ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
     });
+    registerRequestContext(app, { trustProxy: config.trustProxy });
     app.decorateRequest('apiKey', /** @type {any} */ (null));
     jsonParser(app);
     app.setErrorHandler(createErrorHandler(GeoError));
