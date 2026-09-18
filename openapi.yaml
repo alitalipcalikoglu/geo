@@ -1,0 +1,1871 @@
+openapi: 3.1.0
+info:
+  title: geo
+  version: "1.0.0"
+  description: >-
+    IP geolocation, reference data (countries, currencies, time zones) and phone/distance helpers,
+    plus your own place collections with nearby search. IP geolocation reads MaxMind-format (MMDB)
+    files configured via MMDB_PATH/ASN_MMDB_PATH; when MMDB_PATH is unset, IP lookups still work
+    for special (private/loopback/link-local/multicast/reserved/unspecified) addresses but return
+    503 for public ones. A freshly opened MMDB file is checksum-verified (against MMDB_SHA256 /
+    ASN_MMDB_SHA256, or a `<path>.sha256` sidecar in standard sha256sum format, when either is
+    configured) and then validated with real tree-walk lookups before it ever replaces the reader
+    currently serving traffic — both at process start and on a manual reload
+    (POST /v1/database/reload). A failure at any of those stages leaves the previously loaded
+    database, if any, untouched and serving.
+security:
+  - ApiKey: []
+paths:
+  /health:
+    get:
+      operationId: geo.health.check
+      summary: Liveness check
+      description: Always returns 200 once the process is accepting connections. No dependency checks.
+      tags: [ops]
+      x-stack-visibility: public
+      security: []
+      responses:
+        '200':
+          description: Process is up.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /ready:
+    get:
+      operationId: geo.ready.check
+      summary: Readiness check
+      description: >-
+        Runs `db.ping()` and, when MMDB_PATH is configured, checks that the IP database is loaded
+        (`this.ipLookup.available`). The result is cached for 10 seconds
+        (`GeoApi.READY_CACHE_MS`); a successful `POST /v1/database/reload` invalidates the cache so
+        the next `/ready` call re-checks immediately instead of serving a stale verdict from before
+        the reload.
+      tags: [ops]
+      x-stack-visibility: public
+      security: []
+      responses:
+        '200':
+          description: The database check (if applicable) passed.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: >-
+            `db.ping()` failed, or MMDB_PATH is configured but no IP database is currently loaded
+            (never loaded, or the last load/reload attempt failed checksum, parsing or validation).
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+  /v1/info:
+    get:
+      operationId: geo.info.get
+      summary: Service identity and capabilities
+      description: >-
+        Registered outside the `/v1` authentication boundary despite its path: unauthenticated,
+        same as `/health` and `/ready`.
+      tags: [ops]
+      x-stack-visibility: public
+      security: []
+      responses:
+        '200':
+          description: Identity and capability information.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InfoResponse'
+  /metrics:
+    get:
+      operationId: geo.metrics.get
+      summary: Prometheus metrics
+      description: >-
+        Prometheus text exposition format: IP lookups by result (hit/miss/special), whether the IP
+        database is loaded, its build time, place-collection and place counts, database file size,
+        process uptime. Requires a `read`-role API key (same Bearer auth as `/v1/*`); this route is
+        NOT behind the `/v1` rate limiter (registered in a separate plugin scope that does not
+        install `@fastify/rate-limit`).
+      tags: [ops]
+      x-stack-visibility: operational
+      x-required-role: read
+      responses:
+        '200':
+          description: Metrics rendered as Prometheus text.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            text/plain; version=0.0.4; charset=utf-8:
+              schema:
+                type: string
+                description: Prometheus text exposition format.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/ip/self:
+    get:
+      operationId: geo.ip.lookupSelf
+      summary: Look up the caller's own IP address
+      description: >-
+        Looks up `request.ip` (the client address Fastify resolves, honoring TRUST_PROXY). Same
+        lookup logic and response shape as `GET /v1/ip/{ip}`.
+      tags: [ip]
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/Lang'
+      responses:
+        '200':
+          $ref: '#/components/responses/IpLookupOk'
+        '400':
+          $ref: '#/components/responses/InvalidIp'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+  /v1/ip/{ip}:
+    get:
+      operationId: geo.ip.lookup
+      summary: Look up an IP address
+      description: >-
+        Resolves country, region, city, coordinates, time zone and (when ASN_MMDB_PATH is
+        configured) ASN/organization for a public IPv4 or IPv6 address. Special-range addresses
+        (private, loopback, link-local, multicast, reserved, unspecified — `kind` in the response)
+        are classified without consulting the MMDB file and always return `found: false` with every
+        geo field `null`, never a 503, even when no IP database is configured at all. A public
+        address returns 503 DATABASE_UNAVAILABLE only when no city database is configured or the
+        currently loaded one failed; the ASN lookup, when configured, augments the result but never
+        causes a 503 on its own (a missing/failed ASN database just leaves `asn: null`).
+      tags: [ip]
+      x-required-role: read
+      parameters:
+        - name: ip
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 64
+          example: 1.1.1.1
+        - $ref: '#/components/parameters/Lang'
+      responses:
+        '200':
+          $ref: '#/components/responses/IpLookupOk'
+        '400':
+          $ref: '#/components/responses/InvalidIp'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+  /v1/ip/batch:
+    post:
+      operationId: geo.ip.lookupBatch
+      summary: Look up multiple IP addresses
+      description: >-
+        Two-layer size cap: the JSON schema allows up to 1000 items (`maxItems: 1000`) as an outer
+        ceiling — exceeding it fails the whole request with 400 VALIDATION_FAILED before the
+        handler runs. The real operative cap is the `MAX_BATCH` environment variable (default 100,
+        configurable 1-1000); a request between `MAX_BATCH` and 1000 items passes schema validation
+        but is then rejected whole with 413 BATCH_TOO_LARGE by the handler.
+
+        **Per-item errors do not fail the batch.** For each IP that passes both caps, any domain
+        error the single-IP lookup would have thrown (`INVALID_IP`, or — most importantly —
+        `DATABASE_UNAVAILABLE`) is caught per item and reported as `{ ip, ok: false, error: {
+        code, message } }` inside an overall HTTP 200. This is a real asymmetry with
+        `GET /v1/ip/{ip}` / `GET /v1/ip/self`: there, `DATABASE_UNAVAILABLE` is a genuine HTTP 503;
+        here, the identical condition never changes the batch's HTTP status — it only ever appears
+        as a per-item `ok: false` entry.
+      tags: [ip]
+      x-required-role: read
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IpBatchRequest'
+      responses:
+        '200':
+          description: >-
+            One result per input IP, in the same order, each independently ok or failed (see
+            description above — a per-item failure never changes this 200).
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IpBatchResponse'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/BatchTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/database:
+    get:
+      operationId: geo.database.getInfo
+      summary: Current IP database status
+      description: Whether a city/ASN database is loaded, its metadata, when it was loaded, and lookup counters since process start.
+      tags: [database]
+      x-required-role: read
+      responses:
+        '200':
+          $ref: '#/components/responses/DatabaseInfoOk'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/database/reload:
+    post:
+      operationId: geo.database.reload
+      summary: Reload the configured IP database file(s) from disk
+      description: >-
+        Re-reads MMDB_PATH/ASN_MMDB_PATH. Each candidate file is checksum-verified (when
+        MMDB_SHA256/ASN_MMDB_SHA256 or a `<path>.sha256` sidecar is configured), opened, and
+        validated with real lookups for known public IPs (1.1.1.1, 8.8.8.8) — a thrown error at any
+        stage rejects that candidate. Both candidates are fully validated into local variables
+        before either replaces the reader currently serving, so a failure here never disturbs
+        already-loaded databases: on failure the previous readers (if any) keep serving unchanged
+        and this returns 409 DATABASE_RELOAD_FAILED. On success, the response is the same shape as
+        `GET /v1/database`, and the next `GET /ready` re-checks immediately instead of using its
+        10-second cache.
+      tags: [database]
+      x-required-role: write
+      responses:
+        '200':
+          $ref: '#/components/responses/DatabaseInfoOk'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/DatabaseReloadFailed'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/countries:
+    get:
+      operationId: geo.countries.list
+      summary: List countries
+      description: Optionally filtered by name/code prefix, continent, EU membership or currency.
+      tags: [countries]
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/Lang'
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+          description: Case/accent-folded prefix match against the localized name, alpha-2 or alpha-3 code.
+        - name: continent
+          in: query
+          schema:
+            type: string
+            enum: [AF, AN, AS, EU, NA, OC, SA, af, an, as, eu, na, oc, sa]
+        - name: eu
+          in: query
+          schema: { type: string, enum: ['true', 'false'] }
+        - name: currency
+          in: query
+          schema: { type: string, pattern: '^[A-Za-z]{3}$' }
+      responses:
+        '200':
+          description: Countries matching the filter, sorted by localized name.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CountryView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/countries/{code}:
+    get:
+      operationId: geo.countries.get
+      summary: Get a country by code
+      description: Looked up by alpha-2, alpha-3 or numeric code, case-insensitive.
+      tags: [countries]
+      x-required-role: read
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string, minLength: 2, maxLength: 3 }
+          example: TR
+        - $ref: '#/components/parameters/Lang'
+      responses:
+        '200':
+          description: The matched country.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [country]
+                properties:
+                  country:
+                    $ref: '#/components/schemas/CountryView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CountryNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/currencies:
+    get:
+      operationId: geo.currencies.list
+      summary: List currencies
+      description: Every currency used by at least one country in the reference table, sorted by ISO code.
+      tags: [currencies]
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/Lang'
+      responses:
+        '200':
+          description: All currencies.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CurrencyView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/currencies/{code}:
+    get:
+      operationId: geo.currencies.get
+      summary: Get a currency by ISO 4217 code
+      description: 404s unless the code is used by at least one country in the reference table (not every ISO 4217 code is accepted).
+      tags: [currencies]
+      x-required-role: read
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string, minLength: 2, maxLength: 3 }
+          example: TRY
+        - $ref: '#/components/parameters/Lang'
+      responses:
+        '200':
+          description: The matched currency.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [currency]
+                properties:
+                  currency:
+                    $ref: '#/components/schemas/CurrencyView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CurrencyNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/timezones:
+    get:
+      operationId: geo.timezones.list
+      summary: List time zones
+      description: Every IANA zone name Node's ICU knows plus every zone in the reference table (their union), optionally filtered.
+      tags: [timezones]
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/Lang'
+        - name: country
+          in: query
+          schema: { type: string, minLength: 2, maxLength: 3 }
+          description: Restrict to the zones of one country (alpha-2/alpha-3/numeric). 404s (COUNTRY_NOT_FOUND) if the country is unknown.
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+          description: Case-insensitive substring match against the zone name.
+      responses:
+        '200':
+          description: Matching time zones, evaluated at the current instant.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TimezoneView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CountryNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/timezones/{tzPath}:
+    get:
+      operationId: geo.timezones.get
+      summary: Get a time zone by IANA name
+      description: >-
+        **Wildcard route caveat**: the real Fastify route is `GET /v1/timezones/*`, a wildcard that
+        captures everything after `/v1/timezones/` as one string — including embedded `/`
+        characters (e.g. `Europe/Istanbul`, `America/Argentina/Buenos_Aires`). Standard OpenAPI
+        `{param}` path templating cannot represent an embedded-slash capture in one segment; the
+        `{tzPath}` placeholder here is a documentation convention for "the rest of the path", not a
+        single path segment. A client must URL-encode each `/` only if its HTTP library would
+        otherwise treat it as a path separator before it reaches this route — Fastify itself
+        matches the raw path against the wildcard, embedded slashes included, unencoded. Both the
+        current IANA name and recognized aliases resolvable by the runtime's ICU (e.g.
+        `Asia/Calcutta`) are accepted; unresolvable names return 404 TIMEZONE_NOT_FOUND.
+      tags: [timezones]
+      x-required-role: read
+      parameters:
+        - name: tzPath
+          in: path
+          required: true
+          schema: { type: string }
+          description: The full IANA time zone name, embedded slashes included (see the wildcard caveat above).
+          example: Europe/Istanbul
+        - $ref: '#/components/parameters/Lang'
+      responses:
+        '200':
+          description: The matched time zone.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [timezone]
+                properties:
+                  timezone:
+                    $ref: '#/components/schemas/TimezoneView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/TimezoneNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/phone:
+    get:
+      operationId: geo.phone.normalize
+      summary: Normalize a phone number to E.164
+      description: >-
+        National numbering plans are not modelled: validity only checks that the resolved calling
+        code is known and the digit count is 8-15 (E.164 length rule), not that the subscriber
+        number actually exists. When `number` has no `+`/`00` international prefix, `country` is
+        required to resolve it as a national number; if `country` is given but not a known country
+        code, this returns 404 COUNTRY_NOT_FOUND (not a 400) — the same code
+        `GET /v1/countries/{code}` uses. An unresolvable international calling code, or a missing
+        `country` for a national-format number, is not an error: it returns 200 with `valid: false`
+        and a `reason`.
+      tags: [phone]
+      x-required-role: read
+      parameters:
+        - name: number
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 40 }
+          example: "+90 532 000 00 00"
+        - name: country
+          in: query
+          schema: { type: string, minLength: 2, maxLength: 3 }
+          description: Default country for a number given without an international prefix.
+          example: TR
+      responses:
+        '200':
+          $ref: '#/components/responses/PhoneNormalizeOk'
+        '400':
+          $ref: '#/components/responses/InvalidPhone'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CountryNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/phone/batch:
+    post:
+      operationId: geo.phone.normalizeBatch
+      summary: Normalize multiple phone numbers
+      description: >-
+        Same two-layer size cap as `POST /v1/ip/batch`: JSON schema allows up to 1000 items
+        (`maxItems: 1000`) as an outer ceiling (exceeding it is 400 VALIDATION_FAILED before the
+        handler runs); the real operative cap is `MAX_BATCH` (default 100) — between `MAX_BATCH`
+        and 1000 items is rejected whole with 413 BATCH_TOO_LARGE.
+
+        Per-item errors do not fail the batch: any domain error a single normalize call would throw
+        for one number — `INVALID_PHONE`, or `COUNTRY_NOT_FOUND` when the shared `country` is not a
+        known code — is caught per item and reported as `{ number, ok: false, error: { code,
+        message } }` inside an overall HTTP 200, exactly like `POST /v1/ip/batch`. Phone
+        normalization has no database dependency, so unlike the IP batch route there is no
+        `DATABASE_UNAVAILABLE` case here.
+      tags: [phone]
+      x-required-role: read
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PhoneBatchRequest'
+      responses:
+        '200':
+          description: One result per input number, in the same order, each independently ok or failed.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PhoneBatchResponse'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/BatchTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/distance:
+    get:
+      operationId: geo.distance.compute
+      summary: Great-circle distance and bearing between two points
+      description: >-
+        Haversine distance on a WGS-84 sphere (R = 6371.0088 km) between any two valid coordinates.
+        Unlike `GET /v1/collections/{name}/nearby`, there is no radius cap here — `MAX_RADIUS_KM`
+        does not apply to this route at all; any two points that individually pass coordinate
+        validation (lat in [-90,90], lng in [-180,180]) are accepted, however far apart.
+      tags: [distance]
+      x-required-role: read
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, pattern: '^\s*-?\d{1,3}(\.\d+)?\s*,\s*-?\d{1,3}(\.\d+)?\s*$' }
+          example: "41.0082,28.9784"
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, pattern: '^\s*-?\d{1,3}(\.\d+)?\s*,\s*-?\d{1,3}(\.\d+)?\s*$' }
+          example: "40.7128,-74.0060"
+      responses:
+        '200':
+          description: Distance and initial bearing from `from` to `to`.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [from, to, km, m, mi, bearing]
+                properties:
+                  from: { $ref: '#/components/schemas/Point' }
+                  to: { $ref: '#/components/schemas/Point' }
+                  km: { type: number, description: Great-circle distance, rounded to 3 decimals. }
+                  m: { type: number, description: Distance in meters, rounded to the nearest integer. }
+                  mi: { type: number, description: Distance in miles, rounded to 3 decimals. }
+                  bearing: { type: number, description: Initial bearing in degrees from north, clockwise, rounded to 1 decimal. }
+        '400':
+          $ref: '#/components/responses/InvalidCoordinates'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/collections:
+    get:
+      operationId: geo.collections.list
+      summary: List place collections
+      tags: [collections]
+      x-required-role: read
+      responses:
+        '200':
+          description: Every collection, with its current place count.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CollectionView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    post:
+      operationId: geo.collections.create
+      summary: Create a place collection
+      tags: [collections]
+      x-required-role: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  pattern: '^[a-z0-9]+([.\-_][a-z0-9]+)*$'
+                  maxLength: 80
+                description:
+                  type: string
+                  maxLength: 500
+      responses:
+        '201':
+          description: The created collection (0 places).
+          headers:
+            Location:
+              description: '`/v1/collections/{name}`'
+              schema: { type: string }
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [collection]
+                properties:
+                  collection:
+                    $ref: '#/components/schemas/CollectionView'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/CollectionExists'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/collections/{name}:
+    get:
+      operationId: geo.collections.get
+      summary: Get a place collection
+      tags: [collections]
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/CollectionName'
+      responses:
+        '200':
+          description: The matched collection.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [collection]
+                properties:
+                  collection:
+                    $ref: '#/components/schemas/CollectionView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CollectionNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    patch:
+      operationId: geo.collections.patch
+      summary: Update a place collection's description
+      tags: [collections]
+      x-required-role: write
+      parameters:
+        - $ref: '#/components/parameters/CollectionName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                description:
+                  type: string
+                  maxLength: 500
+      responses:
+        '200':
+          description: The updated collection.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [collection]
+                properties:
+                  collection:
+                    $ref: '#/components/schemas/CollectionView'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CollectionNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    delete:
+      operationId: geo.collections.delete
+      summary: Delete a place collection and all its places
+      tags: [collections]
+      x-required-role: write
+      parameters:
+        - $ref: '#/components/parameters/CollectionName'
+      responses:
+        '204':
+          description: Deleted.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CollectionNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/collections/{name}/clear:
+    post:
+      operationId: geo.collections.clear
+      summary: Remove every place from a collection
+      description: The collection itself is kept; only its places are removed.
+      tags: [collections]
+      x-required-role: write
+      parameters:
+        - $ref: '#/components/parameters/CollectionName'
+      responses:
+        '200':
+          description: Number of places removed.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [removed]
+                properties:
+                  removed: { type: integer, minimum: 0 }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CollectionNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/collections/{name}/places:
+    put:
+      operationId: geo.places.upsert
+      summary: Insert or replace places in a collection, all or nothing
+      description: >-
+        Atomic: either every place in the request is applied, or (on a duplicate `id` within the
+        request, an empty name, invalid coordinates, or the collection's MAX_POINTS cap being
+        exceeded) none of it is, and the whole call fails with 400 INVALID_PLACE or 413
+        BATCH_TOO_LARGE. The MAX_POINTS cap (default 5000, env-configurable) limits the total
+        number of places in one collection after the call, and is distinct from this route's own
+        request-size ceiling (`maxItems: 100000` places per call).
+      tags: [places]
+      x-required-role: write
+      parameters:
+        - $ref: '#/components/parameters/CollectionName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [places]
+              properties:
+                places:
+                  type: array
+                  minItems: 1
+                  maxItems: 100000
+                  items:
+                    $ref: '#/components/schemas/PlaceInput'
+      responses:
+        '200':
+          description: >-
+            Counts for this call. `total` is the collection's place count after the call (places
+            existing before the call, plus newly created ones — an updated place does not change
+            the count).
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [created, updated, total]
+                properties:
+                  created: { type: integer, minimum: 0 }
+                  updated: { type: integer, minimum: 0 }
+                  total: { type: integer, minimum: 0 }
+        '400':
+          description: A schema validation failure, or an invalid place (duplicate id, empty name, or out-of-range coordinates) — see the shared ErrorEnvelope; `code` is `VALIDATION_FAILED` or `INVALID_PLACE`.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                invalidPlace:
+                  value: { error: { code: INVALID_PLACE, message: 'place "hq": lat must be between -90 and 90', details: { index: 0 } } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CollectionNotFound'
+        '413':
+          $ref: '#/components/responses/BatchTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    get:
+      operationId: geo.places.list
+      summary: List places in a collection
+      tags: [places]
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/CollectionName'
+        - name: limit
+          in: query
+          schema: { type: string, pattern: '^([1-9]|[1-9][0-9]|[1-9][0-9][0-9]|1000)$' }
+          description: Default 50.
+        - name: offset
+          in: query
+          schema: { type: string, pattern: '^(0|[1-9][0-9]{0,6})$' }
+          description: Default 0.
+      responses:
+        '200':
+          description: A page of places.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total, limit, offset]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PlaceView'
+                  total: { type: integer, minimum: 0, description: Total places in the collection, independent of paging. }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CollectionNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/collections/{name}/places/{id}:
+    get:
+      operationId: geo.places.get
+      summary: Get a place by id
+      tags: [places]
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/CollectionName'
+        - $ref: '#/components/parameters/PlaceId'
+      responses:
+        '200':
+          description: The matched place.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [place]
+                properties:
+                  place:
+                    $ref: '#/components/schemas/PlaceView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The collection does not exist, or it exists but has no place with this id.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                collectionNotFound:
+                  value: { error: { code: COLLECTION_NOT_FOUND, message: 'collection "stores" not found' } }
+                placeNotFound:
+                  value: { error: { code: PLACE_NOT_FOUND, message: 'place "hq" not found in "stores"' } }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    delete:
+      operationId: geo.places.delete
+      summary: Delete a place
+      tags: [places]
+      x-required-role: write
+      parameters:
+        - $ref: '#/components/parameters/CollectionName'
+        - $ref: '#/components/parameters/PlaceId'
+      responses:
+        '204':
+          description: Deleted.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The collection does not exist, or it exists but has no place with this id.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                collectionNotFound:
+                  value: { error: { code: COLLECTION_NOT_FOUND, message: 'collection "stores" not found' } }
+                placeNotFound:
+                  value: { error: { code: PLACE_NOT_FOUND, message: 'place "hq" not found in "stores"' } }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/collections/{name}/nearby:
+    get:
+      operationId: geo.places.nearby
+      summary: Places near a point, nearest first
+      description: >-
+        `radius` (km) defaults to `min(50, MAX_RADIUS_KM)` and must be between 0 (exclusive) and
+        `MAX_RADIUS_KM` (env-configurable, default 500); out of range fails with 400
+        INVALID_COORDINATES — the same code used for an invalid `lat`/`lng`
+        (`GeoError.STATUS.INVALID_COORDINATES` is genuinely overloaded across both triggers). Extra
+        query parameters of the form `filter.<key>=<value>` (not individually listed below — the
+        key name is caller-defined) restrict results to places whose `attrs[<key>]` string-equals
+        `<value>`; every other query key must be one of the ones listed.
+      tags: [places]
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/CollectionName'
+        - name: lat
+          in: query
+          required: true
+          schema: { type: string, pattern: '^-?\d{1,3}(\.\d+)?$' }
+        - name: lng
+          in: query
+          required: true
+          schema: { type: string, pattern: '^-?\d{1,3}(\.\d+)?$' }
+        - name: radius
+          in: query
+          schema: { type: string, pattern: '^\d{1,5}(\.\d+)?$' }
+          description: Kilometers. Default min(50, MAX_RADIUS_KM).
+        - name: limit
+          in: query
+          schema: { type: string, pattern: '^([1-9]|[1-9][0-9]|100)$' }
+          description: Default 10, clamped to [1,100].
+      responses:
+        '200':
+          description: Places within `radiusKm` of the point, nearest first.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [from, radiusKm, total, items]
+                properties:
+                  from: { $ref: '#/components/schemas/Point' }
+                  radiusKm: { type: number }
+                  total: { type: integer, minimum: 0, description: Matches found within the radius, before `limit` is applied. }
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/NearbyPlace'
+        '400':
+          $ref: '#/components/responses/InvalidCoordinates'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CollectionNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/stats:
+    get:
+      operationId: geo.stats.get
+      summary: Aggregate service statistics
+      tags: [stats]
+      x-required-role: read
+      responses:
+        '200':
+          description: Database status plus collection/place totals.
+          headers:
+            X-Content-Type-Options:
+              $ref: '#/components/headers/XContentTypeOptions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [database, countries, collections, places, dbBytes, items]
+                properties:
+                  database:
+                    $ref: '#/components/schemas/DatabaseInfo'
+                  countries: { type: integer, description: Size of the bundled reference table (fixed, not affected by the IP database). }
+                  collections: { type: integer, minimum: 0 }
+                  places: { type: integer, minimum: 0, description: Places across every collection. }
+                  dbBytes: { type: integer, minimum: 0, description: Size of the SQLite store backing collections/places. }
+                  items:
+                    type: array
+                    description: One entry per collection.
+                    items:
+                      type: object
+                      required: [name, places, updatedAt]
+                      properties:
+                        name: { type: string }
+                        places: { type: integer, minimum: 0 }
+                        updatedAt: { type: string, format: date-time }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+components:
+  securitySchemes:
+    ApiKey:
+      type: http
+      scheme: bearer
+      description: >-
+        `Authorization: Bearer <secret>`. Keys come from `GEO_API_KEYS`
+        (`id:secret[:role]`, role one of `read`/`write`/`readwrite`, default `readwrite`), compared
+        in constant time across every configured key (no early exit). Every operation below
+        declares its required role via the `x-required-role` extension (`read` or `write`;
+        `readwrite` always satisfies either). Required on every `/v1/*` route and on `/metrics`;
+        `/health`, `/ready` and `/v1/info` are unauthenticated.
+  parameters:
+    Lang:
+      name: lang
+      in: query
+      schema:
+        type: string
+        minLength: 2
+        maxLength: 35
+        pattern: '^[A-Za-z0-9-]+$'
+      description: >-
+        BCP 47 language tag for localized names. Invalid or unrecognized tags never error — they
+        silently fall back to DEFAULT_LANG (env-configurable, default "en").
+    CollectionName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-z0-9]+([.\-_][a-z0-9]+)*$'
+        maxLength: 80
+    PlaceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+  responses:
+    IpLookupOk:
+      description: "The lookup result. `found: false` for a special-range address or a public address not covered by the database."
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/IpLookupResult'
+    DatabaseInfoOk:
+      description: Current IP database status.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DatabaseInfo'
+    PhoneNormalizeOk:
+      description: "The normalization result. `valid: false` for an unresolvable calling code or a missing country on a national-format number — not an error."
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PhoneResult'
+    Unauthorized:
+      description: Missing or invalid API key.
+      headers:
+        WWW-Authenticate:
+          $ref: '#/components/headers/WWWAuthenticate'
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: UNAUTHORIZED, message: missing or invalid API key }
+    Forbidden:
+      description: The API key does not have the role this route requires.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: FORBIDDEN, message: this API key has no write access }
+    RateLimited:
+      description: Per-API-key rate limit exceeded (RATE_LIMIT_MAX per minute, default 3000). Applies to every `/v1/*` route; NOT enforced on `/metrics`.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: RATE_LIMITED, message: 'rate limit exceeded, retry in 42 seconds' }
+    ValidationFailed:
+      description: Request failed JSON Schema validation (missing/extra/malformed field).
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: VALIDATION_FAILED, message: "body/ips must NOT have more than 1000 items", details: [{ path: /ips, message: must NOT have more than 1000 items, params: { limit: 1000 } }] }
+    InvalidIp:
+      description: The value is not a parseable IPv4 or IPv6 address.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: INVALID_IP, message: '"not-an-ip" is not an IP address' }
+    InvalidCoordinates:
+      description: >-
+        `lat`/`lng` out of range or unparseable, OR (on `/nearby` only) `radius` out of range —
+        both use the same INVALID_COORDINATES code.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: INVALID_COORDINATES, message: lat must be between -90 and 90 }
+    InvalidPhone:
+      description: The number is empty, or contains characters other than digits/spaces/parentheses/dots/dashes.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: INVALID_PHONE, message: number is empty }
+    BatchTooLarge:
+      description: More than MAX_BATCH items in this batch call (see the route description for the two-layer cap).
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: BATCH_TOO_LARGE, message: at most 100 items per batch }
+    CountryNotFound:
+      description: No country matches this code.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: COUNTRY_NOT_FOUND, message: 'country "zz" not found' }
+    CurrencyNotFound:
+      description: The code is not used by any country in the reference table.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: CURRENCY_NOT_FOUND, message: 'currency "zzz" is not used by any country' }
+    TimezoneNotFound:
+      description: The name does not resolve to a known IANA time zone.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: TIMEZONE_NOT_FOUND, message: 'time zone "Not/AZone" not found' }
+    CollectionNotFound:
+      description: No collection with this name exists.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: COLLECTION_NOT_FOUND, message: 'collection "stores" not found' }
+    CollectionExists:
+      description: A collection with this name already exists.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: COLLECTION_EXISTS, message: 'collection "stores" already exists' }
+    DatabaseUnavailable:
+      description: No IP city database is configured, or the configured one failed to load. Only reachable for a public address; special-range addresses never trigger this.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: DATABASE_UNAVAILABLE, message: 'no IP database configured (MMDB_PATH)' }
+    DatabaseReloadFailed:
+      description: The reload attempt failed checksum verification, opening or validation; the previously loaded database (if any) is untouched and still serving.
+      headers:
+        X-Content-Type-Options:
+          $ref: '#/components/headers/XContentTypeOptions'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error: { code: DATABASE_RELOAD_FAILED, message: 'IP database failed to reload: city database checksum mismatch for ./data/city.mmdb: expected ..., got ...' }
+  headers:
+    XContentTypeOptions:
+      description: Set on every response by geo's onSend hook.
+      schema:
+        type: string
+        const: nosniff
+    CacheControl:
+      description: Set on every response by geo's onSend hook.
+      schema:
+        type: string
+        const: no-store
+    WWWAuthenticate:
+      description: Present on 401 responses.
+      schema:
+        type: string
+        const: Bearer
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              anyOf:
+                - type: object
+                - type: array
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ok
+    ReadyResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        error:
+          type: string
+          description: Present only when status is "unavailable".
+    InfoResponse:
+      type: object
+      required: [service, version, apiVersion, capabilities, schemaVersion, serviceCore]
+      properties:
+        service:
+          type: string
+          const: geo
+        version:
+          type: string
+          description: geo's own package.json version.
+        apiVersion:
+          type: string
+          const: v1
+        capabilities:
+          type: array
+          items: { type: string }
+          example: [ip-lookup, phone-normalize, distance, place-search, manual-reload]
+        schemaVersion:
+          type: integer
+          description: geo's SQLite schema version (PRAGMA user_version).
+        serviceCore:
+          type: string
+          description: Version of the @atc-web/service-core package actually running.
+
+    Point:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lng: { type: number, minimum: -180, maximum: 180 }
+
+    IpCountry:
+      type: object
+      required: [code, name, eu, callingCodes, currency]
+      properties:
+        code: { type: string, description: ISO 3166-1 alpha-2. }
+        name: { type: string }
+        eu: { type: boolean }
+        callingCodes:
+          type: array
+          items: { type: string }
+          example: ["+90"]
+        currency: { type: ["string", "null"] }
+    IpLookupResult:
+      type: object
+      required: [ip, version, kind, found, network, country, registeredCountry, continent, region, city, postal, location, timezone, asn, source]
+      properties:
+        ip: { type: string }
+        version: { type: integer, enum: [4, 6] }
+        kind:
+          type: string
+          enum: [public, private, loopback, link-local, multicast, reserved, unspecified]
+        found:
+          type: boolean
+          description: False for a special-range address, or a public address not covered by the loaded database.
+        network: { type: ["string", "null"], description: CIDR of the matched record, e.g. "1.1.1.0/24". }
+        country:
+          anyOf:
+            - $ref: '#/components/schemas/IpCountry'
+            - type: "null"
+        registeredCountry:
+          anyOf:
+            - $ref: '#/components/schemas/IpCountry'
+            - type: "null"
+        continent:
+          anyOf:
+            - type: object
+              required: [code, name]
+              properties:
+                code: { type: ["string", "null"] }
+                name: { type: ["string", "null"] }
+            - type: "null"
+        region:
+          anyOf:
+            - type: object
+              required: [code, name]
+              properties:
+                code: { type: ["string", "null"] }
+                name: { type: ["string", "null"] }
+            - type: "null"
+        city:
+          anyOf:
+            - type: object
+              required: [name]
+              properties:
+                name: { type: string }
+            - type: "null"
+        postal: { type: ["string", "null"] }
+        location:
+          anyOf:
+            - type: object
+              required: [lat, lng, accuracyKm]
+              properties:
+                lat: { type: number }
+                lng: { type: number }
+                accuracyKm: { type: ["number", "null"] }
+            - type: "null"
+        timezone: { type: ["string", "null"], description: IANA zone name. }
+        asn:
+          anyOf:
+            - type: object
+              required: [number, organization, network]
+              properties:
+                number: { type: ["integer", "null"] }
+                organization: { type: ["string", "null"] }
+                network: { type: string, description: CIDR of the matched ASN record. }
+            - type: "null"
+          description: Present only when ASN_MMDB_PATH is configured and covers this address.
+        source: { type: ["string", "null"], description: database_type of the loaded city database, e.g. "GeoLite2-City". Null when not found or no database configured. }
+    IpBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [ips]
+      properties:
+        ips:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: { type: string, minLength: 2, maxLength: 64 }
+        lang:
+          type: string
+          minLength: 2
+          maxLength: 35
+          pattern: '^[A-Za-z0-9-]+$'
+    IpBatchItem:
+      type: object
+      required: [ip, ok]
+      properties:
+        ip: { type: string }
+        ok: { type: boolean }
+        result:
+          $ref: '#/components/schemas/IpLookupResult'
+          description: Present when ok is true.
+        error:
+          type: object
+          description: Present when ok is false.
+          required: [code, message]
+          properties:
+            code: { type: string, enum: [INVALID_IP, DATABASE_UNAVAILABLE] }
+            message: { type: string }
+    IpBatchResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/IpBatchItem'
+
+    MmdbInfo:
+      type: object
+      required: [type, buildEpoch, builtAt, ipVersion, nodeCount, recordSize, languages, description, path, sizeBytes, modifiedAt]
+      properties:
+        type: { type: string, example: GeoLite2-City }
+        buildEpoch: { type: integer }
+        builtAt: { type: string, format: date-time }
+        ipVersion: { type: integer, enum: [4, 6] }
+        nodeCount: { type: integer }
+        recordSize: { type: integer, enum: [24, 28, 32] }
+        languages:
+          type: array
+          items: { type: string }
+        description:
+          type: object
+          description: Language-tag-keyed description strings from the MMDB metadata block.
+        path: { type: ["string", "null"] }
+        sizeBytes: { type: integer }
+        modifiedAt: { type: ["string", "null"], format: date-time }
+    DatabaseInfo:
+      type: object
+      required: [configured, loaded, error, loadedAt, city, asn, lookups]
+      properties:
+        configured: { type: boolean, description: Whether MMDB_PATH is set. }
+        loaded: { type: boolean }
+        error: { type: ["string", "null"], description: Message from the last failed load/reload attempt. }
+        loadedAt: { type: ["string", "null"], format: date-time }
+        city:
+          anyOf:
+            - $ref: '#/components/schemas/MmdbInfo'
+            - type: "null"
+        asn:
+          anyOf:
+            - $ref: '#/components/schemas/MmdbInfo'
+            - type: "null"
+        lookups:
+          type: object
+          required: [hit, miss, special]
+          properties:
+            hit: { type: integer, minimum: 0 }
+            miss: { type: integer, minimum: 0 }
+            special: { type: integer, minimum: 0 }
+
+    CountryView:
+      type: object
+      required: [code, alpha3, numeric, name, continent, eu, callingCodes, currency, timezones, flag]
+      properties:
+        code: { type: string, description: ISO 3166-1 alpha-2. }
+        alpha3: { type: string }
+        numeric: { type: string }
+        name: { type: string, description: Localized via lang. }
+        continent:
+          type: object
+          required: [code, name]
+          properties:
+            code: { type: string, enum: [AF, AN, AS, EU, NA, OC, SA] }
+            name: { type: string }
+        eu: { type: boolean }
+        callingCodes:
+          type: array
+          items: { type: string }
+          example: ["+90"]
+        currency:
+          anyOf:
+            - type: object
+              required: [code, name]
+              properties:
+                code: { type: string }
+                name: { type: string }
+            - type: "null"
+        timezones:
+          type: array
+          items: { type: string }
+        flag: { type: string, description: Regional-indicator flag emoji. }
+
+    CurrencyView:
+      type: object
+      required: [code, name, symbol, decimals, countries]
+      properties:
+        code: { type: string }
+        name: { type: string, description: Localized via lang. }
+        symbol: { type: string }
+        decimals: { type: integer, minimum: 0 }
+        countries:
+          type: array
+          items: { type: string }
+          description: Alpha-2 codes of countries using this currency.
+
+    TimezoneView:
+      type: object
+      required: [name, offset, offsetMinutes, abbreviation, longName, dst, observesDst, localTime, countries]
+      properties:
+        name: { type: string, description: Canonical IANA name. }
+        offset: { type: string, example: "+03:00" }
+        offsetMinutes: { type: integer }
+        abbreviation: { type: string, example: "+03" }
+        longName: { type: string, description: Localized via lang. }
+        dst: { type: boolean, description: Currently observing DST. }
+        observesDst: { type: boolean, description: Observes DST at some point in the current year, whether or not currently in it. }
+        localTime: { type: string, description: 'Local wall-clock time at the evaluated instant, "YYYY-MM-DDTHH:mm:ss" (no offset/Z suffix).' }
+        countries:
+          type: array
+          items: { type: string }
+          description: Alpha-2 codes of countries using this zone.
+
+    PhoneResult:
+      type: object
+      required: [input, e164, valid, reason, country, countries, callingCode, national]
+      properties:
+        input: { type: string }
+        e164: { type: ["string", "null"] }
+        valid: { type: boolean }
+        reason: { type: ["string", "null"] }
+        country: { type: ["string", "null"], description: Best-guess alpha-2; first of countries. }
+        countries:
+          type: array
+          items: { type: string }
+          description: Every country sharing the resolved calling code, best match first.
+        callingCode: { type: ["string", "null"], example: "+90" }
+        national: { type: string }
+    PhoneBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [numbers]
+      properties:
+        numbers:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: { type: string, minLength: 1, maxLength: 40 }
+        country:
+          type: string
+          minLength: 2
+          maxLength: 3
+    PhoneBatchItem:
+      type: object
+      required: [number, ok]
+      properties:
+        number: { type: string }
+        ok: { type: boolean }
+        result:
+          $ref: '#/components/schemas/PhoneResult'
+          description: Present when ok is true.
+        error:
+          type: object
+          description: Present when ok is false.
+          required: [code, message]
+          properties:
+            code: { type: string, enum: [INVALID_PHONE, COUNTRY_NOT_FOUND] }
+            message: { type: string }
+    PhoneBatchResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PhoneBatchItem'
+
+    CollectionView:
+      type: object
+      required: [name, description, places, createdBy, createdAt, updatedAt]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        places: { type: integer, minimum: 0 }
+        createdBy: { type: string, description: API key id that created the collection. }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    PlaceInput:
+      type: object
+      additionalProperties: false
+      required: [id, name, lat, lng]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 200 }
+        name: { type: string, maxLength: 200 }
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lng: { type: number, minimum: -180, maximum: 180 }
+        attrs:
+          type: object
+          maxProperties: 50
+          description: Arbitrary caller-defined attributes; string values are matched by nearby's filter.<key> query parameters.
+    PlaceView:
+      type: object
+      required: [id, name, lat, lng, attrs, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        lat: { type: number }
+        lng: { type: number }
+        attrs: { type: object }
+        updatedAt: { type: string, format: date-time }
+    NearbyPlace:
+      allOf:
+        - $ref: '#/components/schemas/PlaceView'
+        - type: object
+          required: [distanceKm, bearing]
+          properties:
+            distanceKm: { type: number, description: Rounded to 3 decimals. }
+            bearing: { type: number, description: Initial bearing in degrees from north, clockwise, rounded to the nearest integer. }
