@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
 import { AuditClient } from '@atc-web/service-core/audit';
-import { createErrorHandler, jsonParser, registerInfo, registerProbes, registerRequestContext, requestOptions } from '@atc-web/service-core/fastify';
+import { createErrorHandler, jsonParser, registerInfo, registerOpenApi, registerProbes, registerRequestContext, requestOptions } from '@atc-web/service-core/fastify';
 import { GeoError } from '../domain/errors.js';
 import { PlacesService } from '../domain/places-service.js';
 import { Reference } from '../domain/reference.js';
@@ -77,6 +77,7 @@ export class GeoApi {
       if (this.ipLookup.paths.mmdbPath && !this.ipLookup.available) throw new Error(`IP database not loaded: ${this.ipLookup.loadError ?? 'unknown'}`);
     }, { cacheMs: GeoApi.READY_CACHE_MS });
     this.invalidateReady = invalidate;
+    registerOpenApi(app, new URL('../../openapi.yaml', import.meta.url));
     registerInfo(app, {
       service: 'geo',
       version: this.version,

@@ -11,6 +11,9 @@ test('API: probes, auth and roles', async (t) => {
   t.after(() => app.close());
   assert.equal((await app.inject({ url: '/health' })).statusCode, 200);
   assert.equal((await app.inject({ url: '/ready' })).statusCode, 200);
+  const spec = await app.inject({ url: '/openapi.yaml' });
+  assert.equal(spec.body, readFileSync(new URL('../openapi.yaml', import.meta.url), 'utf8'));
+  assert.match(String(spec.headers['content-type']), /^text\/yaml/);
   assert.equal((await app.inject({ url: '/v1/countries' })).statusCode, 401);
   assert.equal((await app.inject({ url: '/v1/countries', headers: bearer(WRITE_KEY) })).statusCode, 403);
   assert.equal((await app.inject({ method: 'POST', url: '/v1/collections', headers: bearer(READ_KEY), payload: { name: 'a' } })).statusCode, 403);

@@ -16,6 +16,19 @@ info:
 security:
   - ApiKey: []
 paths:
+  /openapi.yaml:
+    get:
+      operationId: geo.openapi
+      summary: Download the canonical OpenAPI document
+      description: Returns this service's repository-root OpenAPI 3.1 document byte-for-byte.
+      security: []
+      responses:
+        "200":
+          description: Canonical OpenAPI document.
+          content:
+            text/yaml:
+              schema: { type: string }
+
   /health:
     get:
       operationId: geo.health.check
